@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 30 40% 98%;
+  --foreground: 222 30% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 30% 12%;
+  --border: 220 20% 90%;
+  --input: 220 20% 88%;
+  --ring: 245 75% 60%;
+  --primary: 245 70% 56%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 32 90% 55%;
+  --secondary-foreground: 24 40% 12%;
+  --muted: 220 20% 95%;
+  --muted-foreground: 220 10% 45%;
+  --accent: 245 60% 96%;
+  --accent-foreground: 245 70% 30%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --success: 152 60% 36%;
+  --success-foreground: 0 0% 100%;
+}
+
+* { border-color: hsl(var(--border)); }
+
+html { scroll-behavior: smooth; }
+
+/* anchored sections stop below the sticky navbar */
+section[id] { scroll-margin-top: 4.5rem; }
+
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.gradient-hero {
+  background:
+    radial-gradient(1200px 500px at 10% -10%, hsl(245 90% 92% / 0.7), transparent),
+    radial-gradient(900px 400px at 100% 0%, hsl(32 100% 90% / 0.6), transparent),
+    hsl(var(--background));
+}
+
+.scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 999px; }
+
+.line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }

@@ -1,0 +1,10 @@
+node_modules
+.next
+.env
+.env.local
+install.log
+public/uploads/*
+!public/uploads/.gitkeep
+coverage
+*.log
+tsconfig.tsbuildinfo
