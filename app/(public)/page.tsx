@@ -15,6 +15,7 @@ import { BenefitsSection } from '@/components/home/benefits-section';
 import { TestimonialsSection } from '@/components/home/testimonials-section';
 import { FaqSection } from '@/components/home/faq-section';
 import { CtaSection } from '@/components/home/cta-section';
+import { AboutSection } from '@/components/home/about-section';
 import { prisma } from '@/lib/db';
 import { formatINR } from '@/lib/utils';
 import { getFeeSettings, computeFee } from '@/lib/settings';
@@ -93,6 +94,8 @@ export default async function HomePage() {
       </section>
 
       <BenefitsSection />
+
+      <AboutSection />
 
       <TestimonialsSection />
 

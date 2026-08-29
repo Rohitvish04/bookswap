@@ -18,8 +18,8 @@ import type { SessionUser } from '@/lib/auth';
 const links = [
   { href: '/books', label: 'Browse Books' },
   { href: '/#how-it-works', label: 'How It Works' },
+  { href: '/#about', label: 'About' },
   { href: '/#faq', label: 'FAQ' },
-  { href: '/about', label: 'About' },
 ];
 
 export function Navbar({ user }: { user: SessionUser | null }) {
