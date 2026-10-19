@@ -35,116 +35,120 @@ export async function createExchangeRequest(params: {
   if (requestedBookId === offeredBookId) {
     throw new HttpError(400, 'You cannot offer the same book you are requesting.');
   }
+  
+    // Transaction se PEHLE: settings (global prisma use karti hai, isliye bahar)
+  const feeSettings = await getFeeSettings();
+  const fee = computeFee(feeSettings);
+  const expiresAt = new Date(Date.now() + feeSettings.exchangeExpiryDays * 864e5);
 
-  return prisma.$transaction(async (tx) => {
-    const [requestedBook, offeredBook] = await Promise.all([
-      tx.book.findUnique({ where: { id: requestedBookId }, include: { owner: true } }),
-      tx.book.findUnique({ where: { id: offeredBookId }, include: { owner: true } }),
-    ]);
+  return prisma.$transaction(
+    async (tx) => {
+      const [requestedBook, offeredBook] = await Promise.all([
+        tx.book.findUnique({
+          where: { id: requestedBookId },
+          include: { owner: true, wantedBy: true },
+        }),
+        tx.book.findUnique({
+          where: { id: offeredBookId },
+          include: { owner: true, wantedBy: true },
+        }),
+      ]);
 
-    if (!requestedBook) throw new HttpError(404, 'Book not found.');
-    if (!offeredBook) throw new HttpError(404, 'Your offered book was not found.');
-    if (offeredBook.ownerId !== requesterId) {
-      throw new HttpError(403, 'You can only offer a book you own.');
-    }
-    if (requestedBook.ownerId === requesterId) {
-      throw new HttpError(400, 'You cannot exchange your own book.');
-    }
-    if (requestedBook.status !== 'AVAILABLE' || !requestedBook.available) {
-      throw new HttpError(409, 'This book is no longer available.');
-    }
-    if (offeredBook.status !== 'AVAILABLE' || !offeredBook.available) {
-      throw new HttpError(409, 'The book you are offering is not currently available.');
-    }
+      if (!requestedBook) throw new HttpError(404, 'Book not found.');
+      if (!offeredBook) throw new HttpError(404, 'Your offered book was not found.');
+      if (offeredBook.ownerId !== requesterId) {
+        throw new HttpError(403, 'You can only offer a book you own.');
+      }
+      if (requestedBook.ownerId === requesterId) {
+        throw new HttpError(400, 'You cannot exchange your own book.');
+      }
+      if (requestedBook.status !== 'AVAILABLE' || !requestedBook.available) {
+        throw new HttpError(409, 'This book is no longer available.');
+      }
+      if (offeredBook.status !== 'AVAILABLE' || !offeredBook.available) {
+        throw new HttpError(409, 'The book you are offering is not currently available.');
+      }
 
-    await assertNotBlocked(tx, requesterId, requestedBook.ownerId);
+      await assertNotBlocked(tx, requesterId, requestedBook.ownerId);
 
-    // Atomic reservation: only succeeds if both books are still AVAILABLE.
-    // This is what prevents two users from requesting the same book at once.
-    const [reservedRequested, reservedOffered] = await Promise.all([
-      tx.book.updateMany({
-        where: { id: requestedBookId, status: 'AVAILABLE' },
-        data: { status: 'EXCHANGE_PENDING' },
-      }),
-      tx.book.updateMany({
-        where: { id: offeredBookId, status: 'AVAILABLE' },
-        data: { status: 'EXCHANGE_PENDING' },
-      }),
-    ]);
+      // Atomic reservation: dono books abhi bhi AVAILABLE ho tabhi succeed hoga.
+      const [reservedRequested, reservedOffered] = await Promise.all([
+        tx.book.updateMany({
+          where: { id: requestedBookId, status: 'AVAILABLE' },
+          data: { status: 'EXCHANGE_PENDING' },
+        }),
+        tx.book.updateMany({
+          where: { id: offeredBookId, status: 'AVAILABLE' },
+          data: { status: 'EXCHANGE_PENDING' },
+        }),
+      ]);
 
-    if (reservedRequested.count === 0 || reservedOffered.count === 0) {
-      throw new HttpError(409, 'This book was just reserved by someone else. Please try another match.');
-    }
+      if (reservedRequested.count === 0 || reservedOffered.count === 0) {
+        throw new HttpError(409, 'This book was just reserved by someone else. Please try another match.');
+      }
 
-    const [requesterAddr, responderAddr] = await Promise.all([
-      tx.address.findFirst({ where: { userId: requesterId, isDefault: true } }),
-      tx.address.findFirst({ where: { userId: requestedBook.ownerId, isDefault: true } }),
-    ]);
-    const distanceKm =
-      requesterAddr?.latitude != null &&
-      requesterAddr?.longitude != null &&
-      responderAddr?.latitude != null &&
-      responderAddr?.longitude != null
-        ? haversineKm(requesterAddr.latitude, requesterAddr.longitude, responderAddr.latitude, responderAddr.longitude)
-        : null;
+      const [requesterAddr, responderAddr] = await Promise.all([
+        tx.address.findFirst({ where: { userId: requesterId, isDefault: true } }),
+        tx.address.findFirst({ where: { userId: requestedBook.ownerId, isDefault: true } }),
+      ]);
+      const distanceKm =
+        requesterAddr?.latitude != null &&
+        requesterAddr?.longitude != null &&
+        responderAddr?.latitude != null &&
+        responderAddr?.longitude != null
+          ? haversineKm(
+              requesterAddr.latitude,
+              requesterAddr.longitude,
+              responderAddr.latitude,
+              responderAddr.longitude,
+            )
+          : null;
 
-    const requesterBookForScore = await tx.book.findUnique({
-      where: { id: offeredBookId },
-      include: { wantedBy: true },
-    });
-    const requestedBookForScore = await tx.book.findUnique({
-      where: { id: requestedBookId },
-      include: { wantedBy: true },
-    });
-    const scored =
-      requesterBookForScore && requestedBookForScore
-        ? scoreMatch({
-            theirBook: requestedBookForScore,
-            myBook: requesterBookForScore,
-            distanceKm,
-            maxDistanceKm: 0,
-          })
-        : null;
-
-    const feeSettings = await getFeeSettings();
-    const fee = computeFee(feeSettings);
-    const expiresAt = new Date(Date.now() + feeSettings.exchangeExpiryDays * 864e5);
-
-    const exchange = await tx.exchange.create({
-      data: {
-        code: exchangeCode(),
-        requesterId,
-        responderId: requestedBook.ownerId,
-        offeredBookId,
-        requestedBookId,
-        message: message || null,
-        status: 'PENDING',
-        matchScore: scored?.score ?? 0,
+      // Upar hi wantedBy include kar diya, dobara findUnique ki zaroorat nahi
+      const scored = scoreMatch({
+        theirBook: requestedBook,
+        myBook: offeredBook,
         distanceKm,
-        feeAmount: fee.amount,
-        feeType: fee.type,
-        expiresAt,
-        items: {
-          create: [
-            { bookId: offeredBookId, fromRole: 'REQUESTER', titleSnapshot: offeredBook.title },
-            { bookId: requestedBookId, fromRole: 'RESPONDER', titleSnapshot: requestedBook.title },
-          ],
-        },
-        events: { create: { actorId: requesterId, type: 'CREATED', detail: 'Exchange request created.' } },
-      },
-    });
+        maxDistanceKm: 0,
+      });
 
-    await tx.conversation.create({
-      data: {
-        exchangeId: exchange.id,
-        participants: {
-          create: [{ userId: requesterId }, { userId: requestedBook.ownerId }],
+      const exchange = await tx.exchange.create({
+        data: {
+          code: exchangeCode(),
+          requesterId,
+          responderId: requestedBook.ownerId,
+          offeredBookId,
+          requestedBookId,
+          message: message || null,
+          status: 'PENDING',
+          matchScore: scored?.score ?? 0,
+          distanceKm,
+          feeAmount: fee.amount,
+          feeType: fee.type,
+          expiresAt,
+          items: {
+            create: [
+              { bookId: offeredBookId, fromRole: 'REQUESTER', titleSnapshot: offeredBook.title },
+              { bookId: requestedBookId, fromRole: 'RESPONDER', titleSnapshot: requestedBook.title },
+            ],
+          },
+          events: { create: { actorId: requesterId, type: 'CREATED', detail: 'Exchange request created.' } },
         },
-      },
-    });
+      });
 
-    return exchange;
-  });
+      await tx.conversation.create({
+        data: {
+          exchangeId: exchange.id,
+          participants: {
+            create: [{ userId: requesterId }, { userId: requestedBook.ownerId }],
+          },
+        },
+      });
+
+      return exchange;
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
 }
 
 async function loadExchangeOrThrow(tx: Prisma.TransactionClient, exchangeId: string) {
@@ -170,33 +174,37 @@ async function releaseBooks(tx: Prisma.TransactionClient, bookIds: string[]) {
 }
 
 export async function acceptExchange(exchangeId: string, userId: string) {
-  return prisma.$transaction(async (tx) => {
-    const exchange = await loadExchangeOrThrow(tx, exchangeId);
-    if (exchange.responderId !== userId) {
-      throw new HttpError(403, 'Only the book owner can accept this exchange.');
-    }
-    if (exchange.status !== 'PENDING') {
-      throw new HttpError(409, 'This exchange request has already been processed.');
-    }
+  const updated = await prisma.$transaction(
+    async (tx) => {
+      const exchange = await loadExchangeOrThrow(tx, exchangeId);
+      if (exchange.responderId !== userId) {
+        throw new HttpError(403, 'Only the book owner can accept this exchange.');
+      }
+      if (exchange.status !== 'PENDING') {
+        throw new HttpError(409, 'This exchange request has already been processed.');
+      }
 
-    const updated = await tx.exchange.update({
-      where: { id: exchangeId },
-      data: {
-        status: 'ACCEPTED',
-        acceptedAt: new Date(),
-        events: { create: { actorId: userId, type: 'ACCEPTED', detail: 'Exchange accepted.' } },
-      },
-    });
+      return tx.exchange.update({
+        where: { id: exchangeId },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+          events: { create: { actorId: userId, type: 'ACCEPTED', detail: 'Exchange accepted.' } },
+        },
+      });
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
 
-    await notify(
-      exchange.requesterId,
-      'EXCHANGE_ACCEPTED',
-      'Exchange accepted!',
-      'Your exchange request was accepted. Complete payment to confirm it.',
-      `/dashboard/exchanges/${exchangeId}`,
-    );
-    return updated;
-  });
+  // Notification transaction ke BAHAR (commit ke baad)
+  await notify(
+    updated.requesterId,
+    'EXCHANGE_ACCEPTED',
+    'Exchange accepted!',
+    'Your exchange request was accepted. Complete payment to confirm it.',
+    `/dashboard/exchanges/${exchangeId}`,
+  );
+  return updated;
 }
 
 export async function rejectExchange(exchangeId: string, userId: string, reason?: string) {
@@ -359,54 +367,80 @@ export async function markDeliveryMode(exchangeId: string, userId: string, mode:
 
 /** Each side marks completion independently; both must confirm to finalize. */
 export async function markExchangeCompleted(exchangeId: string, userId: string) {
-  return prisma.$transaction(async (tx) => {
-    const exchange = await loadExchangeOrThrow(tx, exchangeId);
-    assertParticipant(exchange, userId);
-    if (exchange.status !== 'CONFIRMED') {
-      throw new HttpError(409, 'This exchange is not ready to be marked completed.');
-    }
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const exchange = await loadExchangeOrThrow(tx, exchangeId);
+      assertParticipant(exchange, userId);
+      if (exchange.status !== 'CONFIRMED') {
+        throw new HttpError(409, 'This exchange is not ready to be marked completed.');
+      }
 
-    const isRequester = exchange.requesterId === userId;
-    const data: Prisma.ExchangeUpdateInput = isRequester
-      ? { requesterCompleted: true }
-      : { responderCompleted: true };
+      const isRequester = exchange.requesterId === userId;
+      // NAYA: dobara click karne par duplicate event nahi banega
+      const alreadyMine = isRequester ? exchange.requesterCompleted : exchange.responderCompleted;
+      if (alreadyMine) {
+        throw new HttpError(409, 'You have already marked this exchange as completed.');
+      }
+      // Dusri side ne pehle se complete kiya hai ya nahi
+      const otherAlreadyDone = isRequester ? exchange.responderCompleted : exchange.requesterCompleted;
+      const bothWillBeDone = otherAlreadyDone;
 
-    const bothWillBeDone =
-      (isRequester ? true : exchange.requesterCompleted) && (isRequester ? exchange.responderCompleted : true);
+      const data: Prisma.ExchangeUpdateInput = isRequester
+        ? { requesterCompleted: true }
+        : { responderCompleted: true };
 
-    if (bothWillBeDone) {
-      Object.assign(data, { status: 'COMPLETED', completedAt: new Date() });
+      if (bothWillBeDone) {
+        Object.assign(data, { status: 'COMPLETED', completedAt: new Date() });
 
-      await tx.book.update({
-        where: { id: exchange.offeredBookId },
-        data: { status: 'EXCHANGED', ownerId: exchange.responderId, available: false },
+        await Promise.all([
+          tx.book.update({
+            where: { id: exchange.offeredBookId },
+            data: { status: 'EXCHANGED', ownerId: exchange.responderId, available: false },
+          }),
+          tx.book.update({
+            where: { id: exchange.requestedBookId },
+            data: { status: 'EXCHANGED', ownerId: exchange.requesterId, available: false },
+          }),
+        ]);
+      }
+
+      const updated = await tx.exchange.update({
+        where: { id: exchangeId },
+        data: {
+          ...data,
+          events: {
+            create: {
+              actorId: userId,
+              type: 'MARK_COMPLETED',
+              detail: bothWillBeDone ? 'Both sides confirmed.' : 'Waiting for the other side.',
+            },
+          },
+        },
       });
-      await tx.book.update({
-        where: { id: exchange.requestedBookId },
-        data: { status: 'EXCHANGED', ownerId: exchange.requesterId, available: false },
-      });
-    }
 
-    const updated = await tx.exchange.update({
-      where: { id: exchangeId },
-      data: {
-        ...data,
-        events: { create: { actorId: userId, type: 'MARK_COMPLETED', detail: bothWillBeDone ? 'Both sides confirmed.' : 'Waiting for the other side.' } },
-      },
-    });
+      return {
+        updated,
+        bothWillBeDone,
+        requesterId: exchange.requesterId,
+        responderId: exchange.responderId,
+        otherId: isRequester ? exchange.responderId : exchange.requesterId,
+      };
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
 
-    if (bothWillBeDone) {
-      await Promise.all([
-        notify(exchange.requesterId, 'EXCHANGE_COMPLETED', 'Exchange completed!', 'Your book exchange is complete. Leave a review!', `/dashboard/exchanges/${exchangeId}`),
-        notify(exchange.responderId, 'EXCHANGE_COMPLETED', 'Exchange completed!', 'Your book exchange is complete. Leave a review!', `/dashboard/exchanges/${exchangeId}`),
-      ]);
-    } else {
-      const otherId = isRequester ? exchange.responderId : exchange.requesterId;
-      await notify(otherId, 'EXCHANGE_COMPLETED', 'Confirm your exchange', 'The other user marked this exchange as completed. Please confirm on your end.', `/dashboard/exchanges/${exchangeId}`);
-    }
+  // Notifications transaction ke BAHAR
+  const link = `/dashboard/exchanges/${exchangeId}`;
+  if (result.bothWillBeDone) {
+    await Promise.all([
+      notify(result.requesterId, 'EXCHANGE_COMPLETED', 'Exchange completed!', 'Your book exchange is complete. Leave a review!', link),
+      notify(result.responderId, 'EXCHANGE_COMPLETED', 'Exchange completed!', 'Your book exchange is complete. Leave a review!', link),
+    ]);
+  } else {
+    await notify(result.otherId, 'EXCHANGE_COMPLETED', 'Confirm your exchange', 'The other user marked this exchange as completed. Please confirm on your end.', link);
+  }
 
-    return updated;
-  });
+  return result.updated;
 }
 
 let lastExpirySweep = 0;
